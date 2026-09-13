@@ -23,9 +23,19 @@ const css = [
   '.sf-row .sf-t b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.sf-row .sf-t span{font-size:12px;opacity:.6}',
   '.sf-chip{font-size:11px;border:1px solid var(--line-2);border-radius:999px;padding:3px 9px;opacity:.85}',
-  '.sf-cam{width:100%;max-width:760px;border-radius:14px;background:#000;aspect-ratio:3/4;object-fit:cover}',
+  '.sf-camwrap{position:relative;width:100%;max-width:760px;margin:0 auto}',
+  '.sf-cam{width:100%;max-height:58vh;aspect-ratio:3/4;object-fit:cover;border-radius:14px;background:#000;display:block;transition:filter .15s}',
+  '.sf-shutter{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);width:64px;height:64px;border-radius:50%;border:4px solid rgba(255,255,255,.9);background:rgba(255,255,255,.3);cursor:pointer}',
+  '.sf-shutter:active{transform:translateX(-50%) scale(.93)}',
+  '.sf-shutter:disabled{opacity:.3;cursor:default}',
+  '.sf-camhint{position:absolute;left:0;right:0;top:46%;text-align:center;color:#fff;opacity:.75;font-size:13px;pointer-events:none}',
+  '.view[data-view="scan"],.view[data-view="docs"]{padding-bottom:160px}',
+  '.sf-crop{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px;overflow:auto}',
+  '.sf-crop .box{position:relative;touch-action:none;line-height:0}',
+  '.sf-crop img{max-width:92vw;max-height:62vh;border-radius:8px;display:block;user-select:none}',
+  '.sf-crop .sel{position:absolute;border:2px solid var(--accent);background:rgba(124,156,255,.18);pointer-events:none}',
   '.sf-thumbs{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}',
-  '.sf-thumb{position:relative;width:92px;height:122px;border-radius:8px;overflow:hidden;border:1px solid var(--line-2)}',
+  '.sf-thumb{position:relative;width:92px;height:122px;border-radius:8px;overflow:hidden;border:1px solid var(--line-2);cursor:pointer}',
   '.sf-thumb img{width:100%;height:100%;object-fit:cover}',
   '.sf-thumb button{position:absolute;top:3px;right:3px;border:0;border-radius:6px;background:rgba(0,0,0,.6);color:#fff;cursor:pointer;width:20px;height:20px;line-height:1}',
   '.sf-msg{margin-top:12px;font-size:13px;opacity:.85}',
@@ -65,7 +75,6 @@ const scanView =
   '<p class="muted">Photograph pages, clean them up, save as one PDF.</p></div></div>' +
   '<div class="sf-bar">' +
   '<button class="btn btn-primary" id="sfCamStart">Start camera</button>' +
-  '<button class="btn btn-ghost" id="sfShoot" disabled>Capture page</button>' +
   '<label class="btn btn-ghost">From gallery<input type="file" id="sfShotFile" accept="image/*" capture="environment" multiple hidden /></label>' +
   '<select class="select" id="sfFilter">' +
   '<option value="scan">Filter: Scan (crisp)</option>' +
@@ -73,7 +82,9 @@ const scanView =
   '<option value="bw">Filter: Black &amp; white</option>' +
   '<option value="original">Filter: Original colour</option>' +
   '</select></div>' +
-  '<video class="sf-cam" id="sfCam" playsinline autoplay muted></video>' +
+  '<div class="sf-camwrap"><video class="sf-cam" id="sfCam" playsinline muted></video>' +
+  '<button class="sf-shutter" id="sfShoot" disabled aria-label="Capture page"></button>' +
+  '<div class="sf-camhint" id="sfCamHint">Tap here to start the camera</div></div>' +
   '<div class="sf-thumbs" id="sfThumbs"></div>' +
   '<div class="sf-bar" style="margin-top:16px">' +
   '<div class="field"><label>PDF name</label><input id="sfScanName" placeholder="Physics notes 13 Sep" /></div>' +
@@ -328,26 +339,105 @@ function applyFilter(ctx, w, h, mode) {
   ctx.putImageData(img, 0, 0)
 }
 
-function pushScan(source, w, h) {
+const loadImg = src => new Promise((res, rej) => {
+  const i = new Image()
+  i.onload = () => res(i); i.onerror = () => rej(new Error('Could not read that image.'))
+  i.src = src
+})
+
+// Live preview filter: CSS approximation of the pixel filters used for the PDF.
+const camCss = mode =>
+  mode === 'scan' ? 'grayscale(1) contrast(1.55) brightness(1.12)'
+    : mode === 'gray' ? 'grayscale(1)'
+      : mode === 'bw' ? 'grayscale(1) contrast(6) brightness(1.06)'
+        : 'none'
+
+async function reprocess(p) {
+  const img = await loadImg(p.raw)
+  const c = p.crop || { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight }
+  const cv = document.createElement('canvas')
+  cv.width = Math.max(1, Math.round(c.w)); cv.height = Math.max(1, Math.round(c.h))
+  const ctx = cv.getContext('2d')
+  ctx.drawImage(img, c.x, c.y, c.w, c.h, 0, 0, cv.width, cv.height)
+  applyFilter(ctx, cv.width, cv.height, p.filter)
+  p.data = cv.toDataURL('image/jpeg', 0.86); p.w = cv.width; p.h = cv.height
+}
+
+async function pushScan(source, w, h) {
   const max = 1600
   const scale = Math.min(1, max / Math.max(w, h))
   const c = document.createElement('canvas')
   c.width = Math.round(w * scale); c.height = Math.round(h * scale)
-  const ctx = c.getContext('2d')
-  ctx.drawImage(source, 0, 0, c.width, c.height)
-  applyFilter(ctx, c.width, c.height, $('#sfFilter').value)
-  scanPages.push({ data: c.toDataURL('image/jpeg', 0.86), w: c.width, h: c.height })
+  c.getContext('2d').drawImage(source, 0, 0, c.width, c.height)
+  const p = { raw: c.toDataURL('image/jpeg', 0.92), filter: $('#sfFilter').value, crop: null }
+  scanPages.push(p)
+  await reprocess(p)
   renderThumbs()
 }
 
 function renderThumbs() {
   $('#sfThumbs').innerHTML = scanPages.map((p, i) =>
-    '<div class="sf-thumb"><img src="' + p.data + '" alt="page ' + (i + 1) + '" />' +
+    '<div class="sf-thumb" data-crop="' + i + '" title="Tap to crop"><img src="' + p.data + '" alt="page ' + (i + 1) + '" />' +
     '<button data-drop="' + i + '" title="Remove">&times;</button></div>').join('')
   $('#sfThumbs').querySelectorAll('[data-drop]').forEach(b => {
-    b.onclick = () => { scanPages.splice(Number(b.dataset.drop), 1); renderThumbs() }
+    b.onclick = e => { e.stopPropagation(); scanPages.splice(Number(b.dataset.drop), 1); renderThumbs() }
+  })
+  $('#sfThumbs').querySelectorAll('[data-crop]').forEach(t => {
+    t.onclick = () => openCrop(Number(t.dataset.crop))
   })
   $('#sfMakePdf').disabled = scanPages.length === 0
+  if (scanPages.length) msg('#sfScanMsg', scanPages.length + ' page(s) ready \u00b7 tap a page to crop or re-filter it.')
+}
+
+async function openCrop(i) {
+  const p = scanPages[i]
+  const img = await loadImg(p.raw)
+  const wrap = document.createElement('div')
+  wrap.className = 'sf-crop'
+  wrap.innerHTML =
+    '<div class="box"><img src="' + p.raw + '" alt="page" /><div class="sel" hidden></div></div>' +
+    '<div class="sf-bar" style="justify-content:center;margin:0">' +
+    '<select class="select" id="sfCropFilter">' +
+    '<option value="scan">Scan (crisp)</option><option value="gray">Greyscale</option>' +
+    '<option value="bw">Black &amp; white</option><option value="original">Original colour</option></select>' +
+    '<button class="btn btn-primary" id="sfCropOk">Apply</button>' +
+    '<button class="btn btn-ghost" id="sfCropReset">Full page</button>' +
+    '<button class="btn btn-ghost" id="sfCropCancel">Cancel</button></div>' +
+    '<div class="sf-msg" style="color:#fff">Drag across the image to keep only the page area.</div>'
+  document.body.appendChild(wrap)
+  const im = wrap.querySelector('img'), sel = wrap.querySelector('.sel')
+  wrap.querySelector('#sfCropFilter').value = p.filter
+  let sx = 0, sy = 0, rect = null, drag = false
+  const at = e => {
+    const r = im.getBoundingClientRect()
+    return {
+      x: Math.min(Math.max(e.clientX - r.left, 0), r.width),
+      y: Math.min(Math.max(e.clientY - r.top, 0), r.height),
+      vw: r.width, vh: r.height,
+    }
+  }
+  im.addEventListener('pointerdown', e => { e.preventDefault(); const q = at(e); sx = q.x; sy = q.y; drag = true; sel.hidden = false })
+  wrap.addEventListener('pointermove', e => {
+    if (!drag) return
+    e.preventDefault()
+    const q = at(e)
+    const x = Math.min(sx, q.x), y = Math.min(sy, q.y), w = Math.abs(q.x - sx), h = Math.abs(q.y - sy)
+    sel.style.left = x + 'px'; sel.style.top = y + 'px'; sel.style.width = w + 'px'; sel.style.height = h + 'px'
+    rect = { x: x, y: y, w: w, h: h, vw: q.vw, vh: q.vh }
+  })
+  wrap.addEventListener('pointerup', () => { drag = false })
+  wrap.querySelector('#sfCropReset').onclick = () => { rect = null; p.crop = null; sel.hidden = true }
+  wrap.querySelector('#sfCropCancel').onclick = () => wrap.remove()
+  wrap.querySelector('#sfCropOk').onclick = async () => {
+    p.filter = wrap.querySelector('#sfCropFilter').value
+    if (rect && rect.w > 12 && rect.h > 12) {
+      const k = img.naturalWidth / rect.vw
+      p.crop = { x: rect.x * k, y: rect.y * k, w: rect.w * k, h: rect.h * k }
+    }
+    wrap.remove()
+    await reprocess(p)
+    renderThumbs()
+  }
 }
 
 function loadJsPdf() {
@@ -406,12 +496,14 @@ async function startCam() {
   v.muted = true
   try { await v.play() } catch (e) { /* Safari resolves on user gesture */ }
   $('#sfShoot').disabled = false
-  msg('#sfScanMsg', 'Frame a page and press Capture. Add as many pages as you like.')
+  $('#sfCamHint').hidden = true
+  msg('#sfScanMsg', 'Frame a page and tap the round shutter. Add as many pages as you like.')
 }
 
 async function stopCam() {
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null }
-  $('#sfShoot').disabled = true
+  const shoot = $('#sfShoot'); if (shoot) shoot.disabled = true
+  const hint = $('#sfCamHint'); if (hint) hint.hidden = false
 }
 
 /* ---------- wiring ---------- */
@@ -444,19 +536,22 @@ function wire() {
 
   $('#sfCamStart').onclick = startCam
   $('#sfCam').onclick = () => { if (!stream) startCam() }
-  $('#sfShoot').onclick = () => {
+  $('#sfShoot').onclick = e => {
+    e.stopPropagation()
     const v = $('#sfCam')
     if (!v.videoWidth) return
     pushScan(v, v.videoWidth, v.videoHeight)
   }
-  $('#sfShotFile').onchange = e => {
+  $('#sfCam').style.filter = camCss($('#sfFilter').value)
+  $('#sfFilter').onchange = () => { $('#sfCam').style.filter = camCss($('#sfFilter').value) }
+  $('#sfShotFile').onchange = async e => {
     const files = Array.prototype.slice.call(e.target.files)
-    files.forEach(f => {
-      const img = new Image()
-      img.onload = () => { pushScan(img, img.naturalWidth, img.naturalHeight); URL.revokeObjectURL(img.src) }
-      img.src = URL.createObjectURL(f)
-    })
     e.target.value = ''
+    for (let i = 0; i < files.length; i++) {
+      const url = URL.createObjectURL(files[i])
+      try { const img = await loadImg(url); await pushScan(img, img.naturalWidth, img.naturalHeight) } catch (err) { msg('#sfScanMsg', err.message, true) }
+      URL.revokeObjectURL(url)
+    }
   }
   $('#sfScanClear').onclick = () => { scanPages = []; renderThumbs() }
   $('#sfMakePdf').onclick = async () => {
