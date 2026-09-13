@@ -1,4 +1,4 @@
-/* Lumen study workspace - front-end. Works offline in demo mode.
+/* StudyForge study workspace - front-end. Works offline in demo mode.
    CONNECT markers show where Supabase / Google auth / AI proxy plug in. */
 
 const LS = {
@@ -324,9 +324,15 @@ async function sendChat() {
     return
   }
   try {
+    // Always send the freshest session token: the Edge Function verifies the user.
+    let token = state.token
+    if (sb) {
+      const s = await sb.auth.getSession()
+      if (s && s.data && s.data.session) { token = s.data.session.access_token; state.token = token }
+    }
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: state.sb.key, Authorization: 'Bearer ' + (state.token || state.sb.key) },
+      headers: { 'Content-Type': 'application/json', apikey: state.sb.key, Authorization: 'Bearer ' + (token || state.sb.key) },
       body: JSON.stringify({ provider: $('#modelSel').value, message: text, context: { book: state.book && state.book.title, page: state.page } }),
     })
     const data = await res.json()
@@ -336,7 +342,7 @@ async function sendChat() {
 $('#chatSend').onclick = sendChat
 $('#chatBox').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } })
 $$('.chat-chips .chip').forEach(c => {
-  if (c.id === 'openClaude' || c.id === 'openGpt' || c.id === 'evalWeek') return
+  if (c.id === 'openClaude') return
   c.onclick = () => { $('#chatBox').value = c.textContent; sendChat() }
 })
 // Free-plan escape hatch: hand the question to claude.ai in a new tab.
@@ -354,19 +360,29 @@ async function initSupabase() {
     const mod = await import('https://esm.sh/@supabase/supabase-js@2')
     sb = mod.createClient(cfg.url, cfg.key)
     const { data } = await sb.auth.getSession()
-    if (data && data.session) setUser(data.session.user)
-    sb.auth.onAuthStateChange((_e, s) => setUser(s ? s.user : null))
+    if (data && data.session) { keepGoogleToken(data.session); setUser(data.session.user, data.session.access_token) }
+    sb.auth.onAuthStateChange((_e, s) => {
+      keepGoogleToken(s)
+      setUser(s ? s.user : null, s ? s.access_token : null)
+    })
     $('#modePill').textContent = 'Supabase connected'
     $('#modePill').classList.add('live')
   } catch (err) {
     $('#modePill').textContent = 'Supabase load failed'
   }
 }
-function setUser(u) {
-  if (!u) { state.user = null; return }
+// The Google OAuth access token (used for Drive uploads) only comes back on the
+// redirect, so stash it with an expiry and reuse it for the rest of the hour.
+function keepGoogleToken(session) {
+  if (session && session.provider_token) {
+    LS.set('sf.gtoken', { token: session.provider_token, exp: Date.now() + 55 * 60 * 1000 })
+  }
+}
+function setUser(u, token) {
+  if (!u) { state.user = null; state.token = null; return }
   const meta = u.user_metadata || {}
-  state.user = { name: meta.full_name || u.email, email: u.email, avatar: meta.avatar_url }
-  state.token = null
+  state.user = { id: u.id, name: meta.full_name || u.email, email: u.email, avatar: meta.avatar_url }
+  state.token = token || null
   $('#userName').textContent = state.user.name
   $('#userMail').textContent = state.user.email
   $('#avatar').textContent = ''
@@ -378,7 +394,16 @@ function setUser(u) {
 $('#authBtn').onclick = async () => {
   if (!sb) { go('settings'); $('#sbUrl').focus(); return }
   if (state.user) { await sb.auth.signOut(); location.reload(); return }
-  await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + location.pathname } })
+  await sb.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: location.origin + location.pathname,
+      // drive.file = access only to files this app creates. Lets each user's
+      // PDFs live in their own Google Drive instead of shared Supabase storage.
+      scopes: 'https://www.googleapis.com/auth/drive.file',
+      queryParams: { access_type: 'offline', prompt: 'consent' },
+    },
+  })
 }
 $('#sbSave').onclick = () => {
   state.sb = { url: $('#sbUrl').value.trim().replace(/\/$/, ''), key: $('#sbKey').value.trim() }
@@ -408,6 +433,17 @@ $('#globalSearch').addEventListener('input', e => {
     .map(n => '<li data-note="' + n.id + '"><div class="n-t">' + esc(n.title || 'Untitled') + '</div><div class="n-s">' + esc((n.body || '').slice(0, 46)) + '</div></li>').join('') ||
     '<li class="muted small" style="padding:12px">No notes match.</li>'
 })
+
+/* ---------- boot ---------- */
+$('#pDate').value = todayISO()
+renderDash(); renderPlanner(); renderBooks(); renderNotes()
+loadNote(state.notes[0] && state.notes[0].id)
+initSupabase()
+if (location.hash) {
+  const v = location.hash.slice(1)
+  if (v === 'reader' && state.books[0]) openBook(state.books[0].id)
+  else go(v)
+}
 
 /* ================= progress: streaks + heatmap ================= */
 function dayMinutes() {
@@ -445,7 +481,7 @@ function renderProgress() {
 
   // heatmap: 18 weeks, columns = weeks, rows = Mon..Sun
   const end = new Date(); end.setHours(0, 0, 0, 0)
-  end.setDate(end.getDate() + (7 - ((end.getDay() + 6) % 7) - 1))
+  end.setDate(end.getDate() + (7 - ((end.getDay() + 6) % 7) - 1)) // end of current week
   const start = new Date(end); start.setDate(start.getDate() - 18 * 7 + 1)
   const cells = []
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
@@ -537,6 +573,7 @@ function parseTimetable(text) {
     const range = line.match(/(\d{1,2})[:.](\d{2})\s*[-\u2013to]+\s*(\d{1,2})[:.](\d{2})/)
     if (!minutes && range) minutes = (+range[3] * 60 + +range[4]) - (+range[1] * 60 + +range[2])
     if (!minutes || minutes <= 0) minutes = 45
+    // strip dates, times and durations to find subject/topic text
     const rest = line
       .replace(/(20\d{2})[-/]\d{1,2}[-/]\d{1,2}/g, '')
       .replace(/\d{1,2}[:.]\d{2}\s*[-\u2013to]*\s*\d{0,2}[:.]?\d{0,2}/g, '')
@@ -597,13 +634,23 @@ if ($('#ttInput')) $('#ttInput').addEventListener('change', async e => {
   e.target.value = ''
 })
 
-/* ---------- boot ---------- */
-$('#pDate').value = todayISO()
-renderDash(); renderPlanner(); renderBooks(); renderNotes()
-loadNote(state.notes[0] && state.notes[0].id)
-initSupabase()
-if (location.hash) {
-  const v = location.hash.slice(1)
-  if (v === 'reader' && state.books[0]) openBook(state.books[0].id)
-  else go(v)
+/* ---------- feature pack bridge ----------
+   features.js adds the document scanner, easy PDF upload, the shared textbook
+   library and Google Drive storage. It only needs this small surface. */
+window.SF = {
+  state: state,
+  LS: LS,
+  esc: esc,
+  uid: uid,
+  go: go,
+  save: save,
+  client: () => sb,
+  openPdfUrl(title, url, key) {
+    const id = key || uid()
+    const existing = state.books.filter(b => b.id === id)[0]
+    if (existing) { existing.url = url; existing.title = title }
+    else state.books.unshift({ id: id, title: title, pages: 0, progress: 0, hue: Math.floor(Math.random() * 360), url: url })
+    save(); renderBooks(); openBook(id)
+  },
 }
+import('./features.js').catch(err => console.warn('feature pack failed to load', err))
