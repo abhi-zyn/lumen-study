@@ -73,7 +73,7 @@ const scanView =
   '<option value="bw">Filter: Black &amp; white</option>' +
   '<option value="original">Filter: Original colour</option>' +
   '</select></div>' +
-  '<video class="sf-cam" id="sfCam" playsinline muted></video>' +
+  '<video class="sf-cam" id="sfCam" playsinline autoplay muted></video>' +
   '<div class="sf-thumbs" id="sfThumbs"></div>' +
   '<div class="sf-bar" style="margin-top:16px">' +
   '<div class="field"><label>PDF name</label><input id="sfScanName" placeholder="Physics notes 13 Sep" /></div>' +
@@ -111,6 +111,15 @@ const msg = (sel, text, err) => {
 }
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'document'
 const kb = n => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB')
+
+function signIn(withDrive) {
+  const options = { redirectTo: location.origin + location.pathname }
+  if (withDrive) {
+    options.scopes = 'https://www.googleapis.com/auth/drive.file'
+    options.queryParams = { prompt: 'consent' }
+  }
+  return sb.auth.signInWithOAuth({ provider: 'google', options: options })
+}
 
 function driveToken() {
   const t = SF.LS.get('sf.gtoken', null)
@@ -243,7 +252,7 @@ async function renderDocs() {
           url = signed.data.signedUrl
         }
         SF.openPdfUrl(d.title, url, 'doc-' + d.id)
-      } catch (err) { msg('#sfDocMsg', err.message === 'drive-auth' ? 'Google Drive access expired \u2014 sign in again to refresh it.' : err.message, true) }
+      } catch (err) { msg('#sfDocMsg', err.message === 'drive-auth' ? 'Google Drive access expired \u2014 press Connect Google Drive again.' : err.message, true) }
     }
   })
   $('#sfDocList').querySelectorAll('[data-deldoc]').forEach(btn => {
@@ -270,7 +279,7 @@ async function addFiles(files, dest) {
       if (dest === 'library') await saveLibrary(f, title, 0)
       else await savePersonal(f, title, 'note', 0)
     } catch (err) {
-      msg(target, (err.message === 'drive-auth' ? 'Google Drive access expired \u2014 sign in again.' : err.message), true)
+      msg(target, (err.message === 'drive-auth' ? 'Google Drive access expired \u2014 press Connect Google Drive again.' : err.message), true)
       return
     }
   }
@@ -364,6 +373,42 @@ async function buildPdf() {
   return doc.output('blob')
 }
 
+async function startCam() {
+  const v = $('#sfCam')
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg('#sfScanMsg', 'This browser has no camera API' + (location.protocol === 'https:' ? '' : ' \u2014 the page must be served over https') + '. Use "From gallery" instead.', true)
+    return
+  }
+  const tries = [
+    { video: { facingMode: { ideal: 'environment' } }, audio: false },
+    { video: { facingMode: 'environment' }, audio: false },
+    { video: true, audio: false },
+  ]
+  let lastErr = null
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(tries[i])
+      break
+    } catch (err) { lastErr = err; stream = null }
+  }
+  if (!stream) {
+    const name = lastErr && lastErr.name
+    const why = name === 'NotAllowedError' ? 'permission was denied \u2014 tap the padlock in the address bar and allow Camera, then press Start camera again'
+      : name === 'NotFoundError' ? 'no camera was found on this device'
+      : name === 'NotReadableError' ? 'another app is already using the camera'
+      : (lastErr ? lastErr.message : 'unknown error')
+    msg('#sfScanMsg', 'Camera could not start: ' + why + '. You can still use "From gallery" to pick photos.', true)
+    return
+  }
+  v.srcObject = stream
+  v.setAttribute('autoplay', '')
+  v.setAttribute('playsinline', '')
+  v.muted = true
+  try { await v.play() } catch (e) { /* Safari resolves on user gesture */ }
+  $('#sfShoot').disabled = false
+  msg('#sfScanMsg', 'Frame a page and press Capture. Add as many pages as you like.')
+}
+
 async function stopCam() {
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null }
   $('#sfShoot').disabled = true
@@ -384,18 +429,21 @@ function wire() {
   ;['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over') }))
   drop.addEventListener('drop', e => addFiles(e.dataTransfer.files, 'docs'))
 
-  $('#sfDriveConnect').onclick = () => $('#authBtn').click()
-
-  $('#sfCamStart').onclick = async () => {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } },
-      })
-      const v = $('#sfCam'); v.srcObject = stream; await v.play()
-      $('#sfShoot').disabled = false
-      msg('#sfScanMsg', 'Frame a page and press Capture. Add as many pages as you like.')
-    } catch (err) { msg('#sfScanMsg', 'Camera unavailable: ' + err.message + ' (use "From gallery" instead)', true) }
+  // Plain Google sign-in (no Drive scope): Google blocks the sign-in screen if a
+  // sensitive scope is requested before the Drive API/scope is approved.
+  $('#authBtn').onclick = async () => {
+    if (!sb) { window.lumenGo('settings'); return }
+    if (SF.state.user) { await sb.auth.signOut(); location.reload(); return }
+    signIn(false)
   }
+  $('#sfDriveConnect').onclick = () => {
+    if (!sb) { window.lumenGo('settings'); return }
+    msg('#sfDocMsg', 'Asking Google for Drive access\u2026 if this is blocked, enable the Drive API and add the drive.file scope in Google Cloud first.')
+    signIn(true)
+  }
+
+  $('#sfCamStart').onclick = startCam
+  $('#sfCam').onclick = () => { if (!stream) startCam() }
   $('#sfShoot').onclick = () => {
     const v = $('#sfCam')
     if (!v.videoWidth) return
@@ -426,7 +474,7 @@ function wire() {
       msg('#sfScanMsg', 'Saved "' + title + '".')
       if (dest === 'library') renderLibrary(); else renderDocs()
     } catch (err) {
-      msg('#sfScanMsg', err.message === 'drive-auth' ? 'Google Drive access expired \u2014 sign in again.' : err.message, true)
+      msg('#sfScanMsg', err.message === 'drive-auth' ? 'Google Drive access expired \u2014 press Connect Google Drive again.' : err.message, true)
     }
   }
 
@@ -444,6 +492,7 @@ async function boot() {
   for (let i = 0; i < 40 && !SF.client(); i++) await new Promise(r => setTimeout(r, 250))
   sb = SF.client()
   if (!sb) return
+  wire()
   for (let i = 0; i < 20 && !SF.state.user; i++) await new Promise(r => setTimeout(r, 250))
   if (SF.state.user) {
     const res = await sb.rpc('is_admin')
