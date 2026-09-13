@@ -1,12 +1,12 @@
-# Lumen — live deployment (zenvx.in)
+# StudyForge — live deployment (zenvx.in)
 
 ## What is already done
 
-The Supabase project is created, migrated and the functions are deployed. Nothing to run yourself except the three steps below.
+The Supabase project is created, migrated and the functions are deployed. Nothing to run yourself except the three steps in "What you still have to do".
 
 | Thing | Value |
 |---|---|
-| Project | `lumen-study` (org `abhi cec`), region `ap-south-1` (Mumbai) |
+| Supabase project | ref `myexcvqjnisvshxyvuww` (org `abhi cec`), region `ap-south-1` (Mumbai) — internal name, not user-visible |
 | API URL | `https://myexcvqjnisvshxyvuww.supabase.co` |
 | Anon key | shipped in `config.js` (safe in the browser — RLS protects the data) |
 | Tables | `profiles`, `tasks`, `notes`, `books`, `highlights`, `sessions` — all with RLS `auth.uid() = user_id` |
@@ -42,13 +42,13 @@ Supabase → Project Settings → Edge Functions → Secrets:
 
 ### 3. Cloudflare Pages (5 min)
 
-Cloudflare dashboard → Workers & Pages → Create → **Pages** → Connect to Git → `abhi-zyn/lumen-study`.
+Cloudflare dashboard → Workers & Pages → Create → **Pages** → Connect to Git → `abhi-zyn/studyforge`.
 
 - Framework preset: **None**
 - Build command: *(leave empty)*
 - Build output directory: `/`
 
-Deploy, then Custom domains → **Add** → `zenvx.in` (and `www.zenvx.in`). Since the domain is already on Cloudflare, DNS is configured automatically. Every push to `main` redeploys.
+Deploy, then Custom domains → **Add** → `zenvx.in` (and `www.zenvx.in`). Since the domain is already on Cloudflare, DNS is set up automatically. Every push to `main` redeploys.
 
 ## Connect Claude (after `MCP_SECRET` and `MCP_USER_ID` are set)
 
@@ -62,7 +62,7 @@ Free plans allow one custom connector — this is it. Then in a chat: "Build a 1
 
 ## Notes
 
-- `ai-chat` is deployed with gateway JWT verification off, but the function itself checks the Supabase session, so only signed-in users can use the tutor.
+- `ai-chat` is deployed with `verify_jwt` off at the gateway but it still checks the Supabase session inside the function, so only signed-in users can use the tutor.
 - The anon key in `config.js` is meant to be public; never put the **service role** key in the front end.
 - Settings in the app still lets you point at a different Supabase project — `config.js` only supplies the default.
-- Free tier limits: 500 MB database, 1 GB storage, 500K Edge Function calls per month. A project paused after 7 idle days can be restored from the dashboard.
+- Free tier limits: 500 MB database, 1 GB storage, 500K Edge Function calls per month. A paused project (7 days idle) can be restored from the dashboard.
